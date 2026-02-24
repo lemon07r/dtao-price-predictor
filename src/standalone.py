@@ -372,6 +372,98 @@ class MockComparisonAnalyzer:
         else:
             plt.show()
     
+    def generate_mining_recommendations(
+        self,
+        limit: int = 5,
+        gpu_clusters: float = 1.0,
+        daily_cluster_cost_tao: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """Generate mining-focused recommendations for subnet selection."""
+        limit = max(1, int(limit))
+        cluster_units = max(float(gpu_clusters), 0.01)
+        cluster_cost = max(float(daily_cluster_cost_tao), 0.0)
+        subnets = self.data_fetcher.get_subnets_list()
+        recommendations = []
+
+        for subnet in subnets:
+            netuid = subnet['netuid']
+
+            prediction = self.price_predictor.predict_future_prices(netuid, days=30)
+            if not prediction.get('success', False):
+                continue
+
+            metrics = self.data_fetcher.get_subnet_metrics(netuid)
+
+            price = subnet.get('price', 0) or metrics.get('price', 0)
+            emission = subnet.get('emission', 0) or metrics.get('emission', 0)
+            raw_active_miners = int(metrics.get('active_miners', 0) or 0)
+            active_miners = max(raw_active_miners, 1)
+
+            miner_share = cluster_units / (active_miners + cluster_units)
+            emission_per_active_miner = emission / active_miners
+
+            price_change = prediction.get('price_change_percent', 0)
+            momentum_factor = 1.0 + max(min(float(price_change), 50.0), -50.0) / 200.0
+            alpha_in = metrics.get('alpha_in', 0)
+            liquidity_factor = 1.0 + min(np.log1p(max(alpha_in, 0.0)) / 12.0, 0.6)
+            validator_factor = 1.0 + min(float(metrics.get('active_validators', 0) or 0) / 250.0, 0.25)
+
+            gross_revenue_index = emission * max(price, 0.0) * miner_share
+            mining_profitability_score = (
+                gross_revenue_index
+                * momentum_factor
+                * liquidity_factor
+                * validator_factor
+            ) - cluster_cost
+
+            max_n = int(metrics.get('max_n', 0) or subnet.get('max_n', 0) or 0)
+            total_registered = int(metrics.get('active_validators', 0)) + raw_active_miners
+            open_slots = max(max_n - total_registered, 0) if max_n > 0 else None
+
+            reasons = []
+            if price_change > 5:
+                reasons.append(f"Predicted 30 Day Price Growth {price_change:.1f}%")
+            if miner_share >= 0.05:
+                reasons.append(f"Favorable miner competition (share {miner_share * 100:.2f}%)")
+            if emission_per_active_miner > 0.01:
+                reasons.append("High emission per active miner")
+            if not reasons:
+                reasons.append("Balanced mining profile")
+
+            reason = ", ".join(reasons)
+            if raw_active_miners == 0:
+                reason = "⚠️ No active miners — verify subnet is operational. " + reason
+            if max_n > 0 and open_slots == 0:
+                reason = f"🚫 FULL ({total_registered}/{max_n} UIDs). " + reason
+            elif max_n > 0 and open_slots is not None and open_slots <= 5:
+                reason = f"⚠️ Nearly full ({total_registered}/{max_n} UIDs, {open_slots} slots left). " + reason
+
+            recommendation = {
+                'netuid': netuid,
+                'name': subnet.get('name', f"Subnet {netuid}"),
+                'mining_profitability_score': mining_profitability_score,
+                'investment_score': mining_profitability_score,
+                'gross_revenue_index': gross_revenue_index,
+                'expected_miner_share_pct': miner_share * 100,
+                'emission_per_active_miner': emission_per_active_miner,
+                'price': price,
+                'emission': emission,
+                'price_change_percent': price_change,
+                'active_validators': metrics.get('active_validators', 0),
+                'active_miners': metrics.get('active_miners', 0),
+                'max_n': max_n,
+                'open_slots': open_slots,
+                'recommendation_reason': reason,
+            }
+            recommendations.append(recommendation)
+
+        recommendations = sorted(
+            recommendations,
+            key=lambda x: x.get('mining_profitability_score', 0),
+            reverse=True,
+        )
+        return recommendations[:limit]
+
     def generate_investment_recommendations(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Generate investment recommendations"""
         limit = max(1, int(limit))

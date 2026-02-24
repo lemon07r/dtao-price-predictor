@@ -687,7 +687,7 @@ class DTAOPredictorGUI:
                 self.mine_tree.insert("", tk.END, values=(
                     rec.get("netuid", ""),
                     rec.get("name", ""),
-                    f"{rec.get('mining_profitability_score', 0):.2f}",
+                    f"{rec.get('mining_profitability_score', 0):.6f}",
                     f"{rec.get('expected_miner_share_pct', 0):.2f}%",
                     f"{rec.get('price', 0):.6f}",
                     f"{rec.get('price_change_percent', 0):.2f}%",
