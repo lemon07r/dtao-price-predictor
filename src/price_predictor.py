@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 import logging
 import os
 import sys
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
@@ -40,10 +40,14 @@ class PricePredictor:
         self.default_model = 'random_forest'
         self.scaler = MinMaxScaler()
     
-    def prepare_features(self, df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
+    def prepare_features(
+        self,
+        df: pd.DataFrame,
+        return_feature_columns: bool = False
+    ) -> Union[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray, List[str]]]:
         """Prepare features and target variables from historical price data"""
         # Ensure data is sorted by date
-        df = df.sort_index()
+        df = df.sort_index().copy()
         
         # Add technical indicators as features
         df['price_lag1'] = df['price'].shift(1)
@@ -83,17 +87,81 @@ class PricePredictor:
         X = df[feature_cols].values
         y = df['price'].values
         
+        if return_feature_columns:
+            return X, y, feature_cols
+
         return X, y
+
+    def _align_features_to_schema(
+        self,
+        X: np.ndarray,
+        feature_columns: List[str],
+        model_result: Dict[str, Any],
+        scaler: MinMaxScaler,
+        netuid: int,
+        fallback_logged: bool = False
+    ) -> Tuple[np.ndarray, List[str], bool]:
+        """
+        Align prepared features with the schema used during training.
+        Falls back to scaler feature count when schema metadata is unavailable.
+        """
+        feature_df = pd.DataFrame(X, columns=feature_columns)
+        training_feature_columns = model_result.get('feature_columns')
+        if not training_feature_columns and model_result.get('feature_names'):
+            training_feature_columns = model_result.get('feature_names')
+            if not fallback_logged:
+                logger.info(
+                    f"Fallback feature alignment for subnet {netuid}: "
+                    "using legacy feature_names schema."
+                )
+                fallback_logged = True
+
+        if training_feature_columns:
+            feature_df = feature_df.reindex(columns=list(training_feature_columns), fill_value=0.0)
+        else:
+            if not fallback_logged:
+                logger.info(
+                    f"Fallback feature alignment for subnet {netuid}: "
+                    "missing training feature schema; using scaler metadata when available."
+                )
+                fallback_logged = True
+
+        expected_feature_count = getattr(scaler, 'n_features_in_', None)
+        if expected_feature_count is not None and feature_df.shape[1] != expected_feature_count:
+            current_feature_count = feature_df.shape[1]
+            if current_feature_count < expected_feature_count:
+                for idx in range(current_feature_count, expected_feature_count):
+                    feature_df[f'_fallback_feature_{idx}'] = 0.0
+            else:
+                feature_df = feature_df.iloc[:, :expected_feature_count]
+
+            if not fallback_logged:
+                logger.info(
+                    f"Fallback feature alignment for subnet {netuid}: "
+                    f"adjusted feature count from {current_feature_count} to {expected_feature_count}."
+                )
+                fallback_logged = True
+        elif expected_feature_count is None and not training_feature_columns and not fallback_logged:
+            logger.info(
+                f"Fallback feature alignment for subnet {netuid}: "
+                "scaler has no feature count metadata; using prepared features as-is."
+            )
+            fallback_logged = True
+
+        return feature_df.values, list(feature_df.columns), fallback_logged
     
     def train_model(self, netuid: int, model_name: Optional[str] = None, historical_days: int = HISTORICAL_WINDOW) -> Dict[str, Any]:
         """Train price prediction model for a specific subnet"""
         try:
-            # Use specified model or default model
-            if model_name not in ['random_forest', 'linear', 'svr', 'lstm', 'arima', 'xgboost', 'prophet']:
-                model_name = 'random_forest'
-                logger.warning(f"Invalid model name, using default model: {model_name}")
-            
-            model = self.models[model_name]
+            # Resolve requested model name and gracefully fall back to the default.
+            resolved_model_name = model_name or self.default_model
+            if resolved_model_name not in self.models:
+                logger.warning(
+                    f"Invalid model name, using default model: {self.default_model}"
+                )
+                resolved_model_name = self.default_model
+
+            model = self.models[resolved_model_name]
             
             # Get historical price data
             df = self.data_fetcher.get_historical_dtao_prices(netuid, days=historical_days)
@@ -107,7 +175,7 @@ class PricePredictor:
                 }
             
             # Prepare features and target variable
-            X, y = self.prepare_features(df)
+            X, y, feature_columns = self.prepare_features(df, return_feature_columns=True)
             
             # Scale features
             X_scaled = self.scaler.fit_transform(X)
@@ -137,7 +205,7 @@ class PricePredictor:
             
             return {
                 'netuid': netuid,
-                'model_name': model_name,
+                'model_name': resolved_model_name,
                 'success': True,
                 'metrics': {
                     'cv_mse': np.mean(errors),
@@ -147,7 +215,8 @@ class PricePredictor:
                 },
                 'model': model,
                 'scaler': self.scaler,
-                'feature_names': [col for col in df.columns if col != 'price' and not df[col].isnull().any()]
+                'feature_columns': feature_columns,
+                'feature_names': feature_columns
             }
             
         except Exception as e:
@@ -182,16 +251,9 @@ class PricePredictor:
                     'error': "Not enough historical data to make prediction"
                 }
             
-            # Prepare features
-            X, _ = self.prepare_features(df)
-            
             # Get model and scaler
             model = model_result['model']
             scaler = model_result['scaler']
-            
-            # Get last data point features for initial prediction
-            last_X = X[-1:]
-            last_features = df.iloc[-1:].copy()
             
             # Prepare future dates
             last_date = df.index[-1]
@@ -199,51 +261,35 @@ class PricePredictor:
             
             # Perform rolling prediction
             future_prices = []
-            for i in range(days):
+            rolling_df = df.copy()
+            fallback_logged = False
+
+            for i, future_date in enumerate(future_dates):
+                X, _, feature_columns = self.prepare_features(rolling_df, return_feature_columns=True)
+                X_aligned, _, fallback_logged = self._align_features_to_schema(
+                    X,
+                    feature_columns,
+                    model_result,
+                    scaler,
+                    netuid,
+                    fallback_logged=fallback_logged
+                )
+                last_X = X_aligned[-1:]
+
                 # Predict next price
                 last_X_scaled = scaler.transform(last_X)
                 next_price = model.predict(last_X_scaled)[0]
                 future_prices.append(next_price)
                 
                 # Update features for next prediction
-                if i < days - 1:  # No need to calculate prediction after the last day
-                    # Create new row features
-                    new_row = last_features.copy()
-                    new_row.index = [future_dates[i]]
-                    new_row['price'] = next_price
-                    
-                    # Update lagged features
-                    for j, fname in enumerate(model_result['feature_names']):
-                        if fname.startswith('price_lag'):
-                            lag = int(fname.split('_')[1])
-                            new_row[fname] = last_features['price'].values[0] if i >= lag else np.nan
-                        elif fname.startswith('ma_'):
-                            window = int(fname.split('_')[1])
-                            new_row[fname] = (last_features['price'].values[0] * (window-1) + next_price) / window
-                        elif fname.startswith('volatility_'):
-                            window = int(fname.split('_')[1])
-                            new_row[fname] = (last_features['volatility_3'].values[0] * 0.9 + abs(next_price - last_features['price'].values[0]) * 0.1) if i < window else np.nan
-                        elif fname.startswith('price_change_'):
-                            window = int(fname.split('_')[2])
-                            if window == 1:
-                                new_row[fname] = (next_price / last_features['price'].values[0]) - 1
-                            elif window == 3:
-                                new_row[fname] = (next_price / last_features['price_change_3'].values[0]) - 1
-                            elif window == 7:
-                                new_row[fname] = (next_price / last_features['price_change_7'].values[0]) - 1
-                    
-                    # Update volume features (if available)
-                    if 'volume' in new_row:
-                        new_row['volume'] = last_features['volume'].values[0]
-                        new_row['volume_lag1'] = last_features['volume'].values[0]
-                        if 'volume_ma3' in new_row:
-                            new_row['volume_ma3'] = last_features['volume_ma3'].values[0]
-                        if 'vol_price_corr' in new_row:
-                            new_row['vol_price_corr'] = last_features['vol_price_corr'].values[0]
-                    
-                    # Update last_features and last_X for next prediction
-                    last_features = new_row
-                    last_X = new_row[model_result['feature_names']].values.reshape(1, -1)
+                if i < days - 1:  # No need to generate next state after the final prediction
+                    next_row = {'price': next_price}
+                    if 'volume' in rolling_df.columns:
+                        next_row['volume'] = rolling_df['volume'].iloc[-1]
+                    rolling_df = pd.concat(
+                        [rolling_df, pd.DataFrame([next_row], index=[future_date])],
+                        axis=0
+                    )
             
             # Create prediction result DataFrame
             future_df = pd.DataFrame({

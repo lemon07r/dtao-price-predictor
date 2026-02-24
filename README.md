@@ -66,10 +66,16 @@ python src/main.py recommend --limit 5
 
 ## Configuration
 
-Before using the tool, update the configuration in `src/config.py`:
+Create a `.env` file in the project root (same folder as `README.md`) and set:
 
-1. Bittensor network (`finney` for mainnet)
-2. Update `TAOSTATS_API_KEY` if you have a Taostats API key
+```bash
+TAOSTATS_API_KEY=your_real_taostats_key
+SUBTENSOR_NETWORK=finney
+```
+
+Notes:
+1. Environment variables already set in your shell take precedence over `.env`.
+2. You can point to a custom env file with `DTAO_ENV_FILE=/path/to/.env`.
 
 ## Prediction Models
 

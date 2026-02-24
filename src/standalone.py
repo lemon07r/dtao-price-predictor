@@ -12,7 +12,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
-import random
 
 # Configuration
 SUBTENSOR_NETWORK = "finney"  # Options: finney, local, mock
@@ -20,7 +19,7 @@ TAOSTATS_API_URL = "https://api.taostats.io"
 TAOSTATS_API_KEY = "your_api_key"  # Please replace with your actual API key
 PREDICTION_WINDOW = 30  # Predict for next 30 days
 HISTORICAL_WINDOW = 60  # Use past 60 days of data for training
-MAX_SUBNETS = 20  # Maximum number of subnets to process
+MAX_SUBNETS = 120  # Maximum number of simulated subnets available in standalone mode
 
 # Configure logging
 logging.basicConfig(
@@ -42,41 +41,43 @@ class MockDataFetcher:
     
     def get_subnets_list(self) -> List[Dict[str, Any]]:
         """Simulate getting subnet list"""
-        # Generate simulated subnet data
+        # Generate deterministic subnet data so refreshes are stable.
+        name_overrides = {
+            1: "Text Prompting",
+            2: "Image Generation",
+            3: "Audio Processing",
+            4: "Code Generation",
+            5: "Data Labeling",
+            6: "Search Ranking",
+        }
         subnet_list = []
-        for i in range(1, 11):
-            netuid = i
-            subnet_name = f"Subnet {i}"
-            emission = np.random.uniform(0.1, 1.0)
-            
-            # Make named subnets for better demo
-            if i == 1:
-                subnet_name = "Text Prompting"
-            elif i == 2:
-                subnet_name = "Image Generation"
-            elif i == 3:
-                subnet_name = "Audio Processing"
-            
+        for netuid in range(1, MAX_SUBNETS + 1):
+            rng = np.random.default_rng(netuid)
+            subnet_name = name_overrides.get(netuid, f"Subnet {netuid}")
+            emission = float(rng.uniform(0.1, 1.0))
+            price = self.get_subnet_dtao_price(netuid) or 0.0
+
             subnet_list.append({
                 "netuid": netuid,
                 "name": subnet_name,
-                "emission": emission
+                "emission": emission,
+                "price": price,
+                "max_n": int(rng.integers(64, 1025)),
+                "min_stake": float(rng.uniform(10, 5000)),
             })
         
         return subnet_list
     
     def get_subnet_dtao_price(self, netuid: int) -> Optional[float]:
         """Simulate getting current subnet price"""
-        # Generate consistent price for fixed subnet IDs
-        np.random.seed(netuid)  # Use subnet ID as seed for consistent data
-        current_price = np.random.uniform(0.1, 5.0)
-        np.random.seed(None)  # Reset random seed
-        return current_price
+        # Generate deterministic price for each subnet ID.
+        rng = np.random.default_rng(netuid * 1000 + 17)
+        return float(rng.uniform(0.1, 5.0))
     
     def get_historical_dtao_prices(self, netuid: int, days: int = 30) -> pd.DataFrame:
         """Simulate getting historical subnet price data"""
-        np.random.seed(netuid)  # Generate consistent data for fixed subnet ID
-        
+        rng = np.random.default_rng(netuid * 100 + days)
+
         # Get current price as baseline
         current_price = self.get_subnet_dtao_price(netuid)
         
@@ -85,10 +86,10 @@ class MockDataFetcher:
         
         # Generate mock price data with some random fluctuations and slight trend
         # Base price fluctuates between 70%-130% of current price
-        base_prices = [current_price * np.random.uniform(0.7, 1.3) for _ in range(days)]
+        base_prices = [current_price * rng.uniform(0.7, 1.3) for _ in range(days)]
         
         # Add slight trend
-        trend_factor = 1.0 + (np.random.random() - 0.3) * 0.003  # Slight upward bias
+        trend_factor = 1.0 + (rng.random() - 0.3) * 0.003  # Slight upward bias
         for i in range(1, days):
             base_prices[i] = base_prices[i-1] * trend_factor
         
@@ -98,31 +99,30 @@ class MockDataFetcher:
             'price': base_prices
         })
         
-        np.random.seed(None)  # Reset random seed
         return df
     
     def get_subnet_metrics(self, netuid: int) -> Dict[str, Any]:
         """Simulate getting subnet metrics"""
-        np.random.seed(netuid)
+        rng = np.random.default_rng(netuid * 10_000 + 31)
         
         # Current price
         current_price = self.get_subnet_dtao_price(netuid)
         
         # Generate some reasonable metrics data
-        active_validators = np.random.randint(5, 64)
-        active_miners = np.random.randint(10, 100)
+        active_validators = int(rng.integers(5, 64))
+        active_miners = int(rng.integers(10, 100))
         
         return {
             'netuid': netuid,
-            'emission': np.random.uniform(0.1, 1.0),
+            'emission': float(rng.uniform(0.1, 1.0)),
             'price': current_price,
-            'tau_in': current_price * np.random.uniform(10000, 100000),
-            'alpha_in': np.random.uniform(10000, 100000),
-            'alpha_out': np.random.uniform(5000, 50000),
+            'tau_in': current_price * float(rng.uniform(10_000, 100_000)),
+            'alpha_in': float(rng.uniform(10_000, 100_000)),
+            'alpha_out': float(rng.uniform(5_000, 50_000)),
             'active_validators': active_validators,
             'active_miners': active_miners,
-            'total_stake': np.random.uniform(1000, 10000),
-            'tempo': np.random.randint(80, 100)
+            'total_stake': float(rng.uniform(1_000, 10_000)),
+            'tempo': int(rng.integers(80, 100))
         }
 
 class MockPricePredictor:
@@ -143,10 +143,10 @@ class MockPricePredictor:
             current_price = historical_df['price'].iloc[-1]
             
             # Simulate future price trend
-            np.random.seed(netuid * 100 + days)  # Use subnet ID and days as seed for consistency
+            rng = np.random.default_rng(netuid * 100 + days)  # Use subnet ID and days as seed for consistency
             
             # Decide prediction trend direction
-            trend_direction = 1 if np.random.random() > 0.4 else -1  # 60% chance of uptrend
+            trend_direction = 1 if rng.random() > 0.4 else -1  # 60% chance of uptrend
             
             # Generate future dates
             future_dates = [(datetime.now() + timedelta(days=i+1)).strftime("%Y-%m-%d") for i in range(days)]
@@ -155,7 +155,7 @@ class MockPricePredictor:
             future_prices = []
             for i in range(days):
                 # Base change rate: -5% to +7%
-                base_change = np.random.uniform(-0.05, 0.07)
+                base_change = rng.uniform(-0.05, 0.07)
                 
                 # Trend factor: linearly enhance trend over time
                 trend_factor = trend_direction * (i / days) * 0.15
@@ -184,8 +184,8 @@ class MockPricePredictor:
             
             # Calculate predicted price change percentage
             price_change = ((future_prices[-1] / current_price) - 1) * 100
-            
-            np.random.seed(None)  # Reset random seed
+
+            metrics_rng = np.random.default_rng(netuid * 100_000 + days)
             
             return {
                 'netuid': netuid,
@@ -196,10 +196,10 @@ class MockPricePredictor:
                 'price_change_percent': price_change,
                 'model_name': model_name or 'mock_model',
                 'metrics': {
-                    'train_r2': np.random.uniform(0.7, 0.95),
-                    'train_mse': np.random.uniform(0.0001, 0.001),
-                    'train_mae': np.random.uniform(0.005, 0.02),
-                    'cv_mse': np.random.uniform(0.0001, 0.002)
+                    'train_r2': float(metrics_rng.uniform(0.7, 0.95)),
+                    'train_mse': float(metrics_rng.uniform(0.0001, 0.001)),
+                    'train_mae': float(metrics_rng.uniform(0.005, 0.02)),
+                    'cv_mse': float(metrics_rng.uniform(0.0001, 0.002))
                 }
             }
             
@@ -272,13 +272,18 @@ class MockComparisonAnalyzer:
     
     def get_top_subnets_by_emission(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Get top N subnets sorted by emission"""
+        limit = max(1, int(limit))
         subnets = self.data_fetcher.get_subnets_list()
         sorted_subnets = sorted(subnets, key=lambda x: x.get('emission', 0), reverse=True)
         return sorted_subnets[:limit]
     
     def get_top_subnets_by_price(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Get top N subnets sorted by price"""
+        limit = max(1, int(limit))
         subnets = self.data_fetcher.get_subnets_list()
+        for subnet in subnets:
+            if 'price' not in subnet:
+                subnet['price'] = self.data_fetcher.get_subnet_dtao_price(subnet.get('netuid', 0)) or 0.0
         sorted_subnets = sorted(subnets, key=lambda x: x.get('price', 0), reverse=True)
         return sorted_subnets[:limit]
     
@@ -369,10 +374,11 @@ class MockComparisonAnalyzer:
     
     def generate_investment_recommendations(self, limit: int = 5) -> List[Dict[str, Any]]:
         """Generate investment recommendations"""
+        limit = max(1, int(limit))
         subnets = self.data_fetcher.get_subnets_list()
         recommendations = []
         
-        for subnet in subnets[:limit*2]:
+        for subnet in subnets:
             netuid = subnet['netuid']
             
             # Predict price
@@ -383,19 +389,36 @@ class MockComparisonAnalyzer:
             # Get metrics
             metrics = self.data_fetcher.get_subnet_metrics(netuid)
             
-            # Calculate investment score
-            score = np.random.uniform(0, 100)  # Simulated score
-            
             price_change = prediction.get('price_change_percent', 0)
+            price = subnet.get('price', 0) or metrics.get('price', 0)
+            emission = subnet.get('emission', 0) or metrics.get('emission', 0)
+            active_count = metrics.get('active_validators', 0) + metrics.get('active_miners', 0)
+            liquidity_ratio = metrics.get('alpha_in', 0) / max(metrics.get('alpha_out', 0), 1.0)
+
+            # Deterministic composite score so rankings are stable between refreshes.
+            growth_score = max(0.0, min(100.0, 50.0 + price_change))
+            emission_score = max(0.0, min(100.0, emission * 100.0))
+            activity_score = max(0.0, min(100.0, (active_count / 120.0) * 100.0))
+            liquidity_score = max(0.0, min(100.0, liquidity_ratio * 10.0))
+            value_score = max(0.0, min(100.0, 100.0 / (1.0 + price)))
+            score = (
+                growth_score * 0.40
+                + liquidity_score * 0.20
+                + activity_score * 0.15
+                + emission_score * 0.15
+                + value_score * 0.10
+            )
             
             # Generate recommendation reasons
             reasons = []
             if price_change > 5:
                 reasons.append(f"Predicted 30 Day Price Growth {price_change:.1f}%")
-            if subnet.get('emission', 0) > 0.2:
-                reasons.append(f"High Block Emission ({subnet.get('emission', 0):.4f} TAO)")
-            if metrics.get('active_validators', 0) + metrics.get('active_miners', 0) > 50:
-                reasons.append(f"High Active Participants ({metrics.get('active_validators', 0) + metrics.get('active_miners', 0)} active)")
+            if emission > 0.2:
+                reasons.append(f"High Block Emission ({emission:.4f} TAO)")
+            if active_count > 50:
+                reasons.append(f"High Active Participants ({active_count} active)")
+            if liquidity_ratio > 2.0:
+                reasons.append(f"Strong Liquidity Ratio ({liquidity_ratio:.2f})")
             
             if not reasons:
                 reasons.append("High Overall Score")
@@ -404,8 +427,8 @@ class MockComparisonAnalyzer:
                 'netuid': netuid,
                 'name': subnet.get('name', f"Subnet {netuid}"),
                 'investment_score': score,
-                'price': subnet.get('price', 0),
-                'emission': subnet.get('emission', 0),
+                'price': price,
+                'emission': emission,
                 'price_change_percent': price_change,
                 'active_validators': metrics.get('active_validators', 0),
                 'active_miners': metrics.get('active_miners', 0),
