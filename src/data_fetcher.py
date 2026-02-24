@@ -559,6 +559,7 @@ class DataFetcher:
                 'active_validators': 0,
                 'active_miners': 0,
                 'tempo': int(getattr(subnet_data, 'tempo', getattr(dynamic, 'tempo', 0)) or 0),
+                'max_n': int(getattr(subnet_data, 'max_n', 0) or 0),
             }
             
             # Get active validators and miners count

@@ -725,6 +725,8 @@ class DTAOPredictorGUI:
             "price_change_percent",
             "active_validators",
             "active_miners",
+            "max_n",
+            "open_slots",
             "recommendation_reason",
         ]
         with open(path, "w", newline="", encoding="utf-8") as csvfile:

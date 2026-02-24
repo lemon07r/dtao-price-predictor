@@ -427,6 +427,15 @@ class ComparisonAnalyzer:
                 if raw_active_miners == 0:
                     reason = "⚠️ No active miners — verify subnet is operational before committing resources. " + reason
 
+                max_n = int(metrics.get('max_n', 0) or subnet.get('max_n', 0) or 0)
+                total_registered = int(metrics.get('active_validators', 0)) + raw_active_miners
+                open_slots = max(max_n - total_registered, 0) if max_n > 0 else None
+
+                if max_n > 0 and open_slots == 0:
+                    reason = f"🚫 FULL ({total_registered}/{max_n} UIDs) — no open slots available. " + reason
+                elif max_n > 0 and open_slots is not None and open_slots <= 5:
+                    reason = f"⚠️ Nearly full ({total_registered}/{max_n} UIDs, {open_slots} slots left). " + reason
+
                 recommendation = {
                     'netuid': netuid,
                     'name': subnet.get('name', f"Subnet {netuid}"),
@@ -441,6 +450,8 @@ class ComparisonAnalyzer:
                     'price_change_percent': subnet.get('price_change_percent', 0),
                     'active_validators': metrics.get('active_validators', 0),
                     'active_miners': metrics.get('active_miners', 0),
+                    'max_n': max_n,
+                    'open_slots': open_slots,
                     'recommendation_reason': reason
                 }
                 scored_subnets.append(recommendation)
