@@ -159,9 +159,10 @@ class ComparisonAnalyzer:
     
     def _calculate_growth_score(self, prediction: Dict[str, Any]) -> float:
         """Calculate growth potential score for a subnet"""
-        # Base score: predicted price change percentage
+        # Base score: predicted price change percentage (capped to avoid outlier dominance)
         price_change = prediction.get('price_change_percent', 0)
-        base_score = max(0, price_change) * 0.8
+        capped_change = max(-100.0, min(float(price_change), 500.0))
+        base_score = max(0, capped_change) * 0.8
         
         # Model reliability adjustment: adjust score based on R²
         r2 = prediction.get('metrics', {}).get('train_r2', 0)
@@ -400,7 +401,8 @@ class ComparisonAnalyzer:
 
                 price = subnet.get('price', 0) or self.data_fetcher.get_subnet_dtao_price(netuid) or 0
                 emission = max(metrics.get('emission', 0), 0.001)
-                active_miners = max(int(metrics.get('active_miners', 0) or 0), 1)
+                raw_active_miners = int(metrics.get('active_miners', 0) or 0)
+                active_miners = max(raw_active_miners, 1)
 
                 miner_share = cluster_units / (active_miners + cluster_units)
                 emission_per_active_miner = emission / active_miners
@@ -419,6 +421,12 @@ class ComparisonAnalyzer:
                     * validator_factor
                 ) - cluster_cost
 
+                reason = self._generate_mining_recommendation_reason(
+                    subnet, metrics, cluster_units
+                )
+                if raw_active_miners == 0:
+                    reason = "⚠️ No active miners — verify subnet is operational before committing resources. " + reason
+
                 recommendation = {
                     'netuid': netuid,
                     'name': subnet.get('name', f"Subnet {netuid}"),
@@ -433,9 +441,7 @@ class ComparisonAnalyzer:
                     'price_change_percent': subnet.get('price_change_percent', 0),
                     'active_validators': metrics.get('active_validators', 0),
                     'active_miners': metrics.get('active_miners', 0),
-                    'recommendation_reason': self._generate_mining_recommendation_reason(
-                        subnet, metrics, cluster_units
-                    )
+                    'recommendation_reason': reason
                 }
                 scored_subnets.append(recommendation)
 
