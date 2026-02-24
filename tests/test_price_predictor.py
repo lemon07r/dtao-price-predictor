@@ -11,9 +11,15 @@ from sklearn.preprocessing import MinMaxScaler
 # Keep tests isolated from bittensor runtime requirements in src.data_fetcher.
 fake_data_fetcher_module = types.ModuleType('src.data_fetcher')
 fake_data_fetcher_module.DataFetcher = object
-sys.modules.setdefault('src.data_fetcher', fake_data_fetcher_module)
+_original_data_fetcher_module = sys.modules.get('src.data_fetcher')
+sys.modules['src.data_fetcher'] = fake_data_fetcher_module
 
 from src.price_predictor import PricePredictor
+
+if _original_data_fetcher_module is not None:
+    sys.modules['src.data_fetcher'] = _original_data_fetcher_module
+else:
+    del sys.modules['src.data_fetcher']
 
 
 class StubDataFetcher:
@@ -98,7 +104,9 @@ class PricePredictorFeatureSchemaTests(unittest.TestCase):
             'model': model,
             'scaler': scaler,
         }
-        predictor.train_model = lambda netuid, model_name=None, historical_days=60: legacy_result
+        predictor.train_model = (
+            lambda netuid, model_name=None, historical_days=60, historical_df=None: legacy_result
+        )
 
         with self.assertLogs('src.price_predictor', level='INFO') as logs:
             result = predictor.predict_future_prices(netuid=1, days=5, model_name='linear')

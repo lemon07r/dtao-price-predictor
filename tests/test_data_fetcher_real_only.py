@@ -30,6 +30,7 @@ class DataFetcherRealOnlyTests(unittest.TestCase):
         resp = MagicMock()
         resp.status_code = status_code
         resp.json.return_value = payload if payload is not None else {}
+        resp.headers = {}
         return resp
 
     def test_real_only_raises_when_historical_api_fails(self):
@@ -87,6 +88,23 @@ class DataFetcherRealOnlyTests(unittest.TestCase):
         self.assertIn("market_cap", result.columns)
         self.assertAlmostEqual(float(result["price"].iloc[-1]), 1.30, places=6)
 
+    def test_historical_prices_use_cache(self):
+        fetcher = DataFetcher(allow_mock_fallback=False)
+        payload = {
+            "data": [
+                {"timestamp": "2025-01-01T00:00:00Z", "price": "1.00"},
+                {"timestamp": "2025-01-02T00:00:00Z", "price": "1.10"},
+            ],
+            "pagination": {"next_page": None},
+        }
+
+        with patch("src.data_fetcher.requests.get", return_value=self._response(200, payload)) as request_mock:
+            first = fetcher.get_historical_dtao_prices(netuid=1, days=2)
+            second = fetcher.get_historical_dtao_prices(netuid=1, days=2)
+
+        self.assertEqual(request_mock.call_count, 1)
+        pd.testing.assert_frame_equal(first, second)
+
     def test_taostats_price_endpoint_uses_pool_latest(self):
         fetcher = DataFetcher(allow_mock_fallback=False)
         payload = {
@@ -103,6 +121,29 @@ class DataFetcherRealOnlyTests(unittest.TestCase):
         self.assertAlmostEqual(price, 2.5, places=6)
         called_url = request_mock.call_args.kwargs.get("url") or request_mock.call_args.args[0]
         self.assertIn("/api/dtao/pool/latest/v1", called_url)
+
+    def test_authorization_header_uses_raw_token(self):
+        with patch("src.data_fetcher.TAOSTATS_API_KEY", "abc:def"):
+            fetcher = DataFetcher(allow_mock_fallback=False)
+            self.assertEqual(fetcher.headers.get("Authorization"), "abc:def")
+
+    def test_authorization_header_strips_bearer_prefix(self):
+        with patch("src.data_fetcher.TAOSTATS_API_KEY", "Bearer abc:def"):
+            fetcher = DataFetcher(allow_mock_fallback=False)
+            self.assertEqual(fetcher.headers.get("Authorization"), "abc:def")
+
+    def test_taostats_get_retries_on_429(self):
+        fetcher = DataFetcher(allow_mock_fallback=False)
+        limited = self._response(429, {"message": "Rate Limited"})
+        ok = self._response(200, {"data": []})
+
+        with patch("src.data_fetcher.requests.get", side_effect=[limited, ok]) as request_mock:
+            with patch("src.data_fetcher.time.sleep") as sleep_mock:
+                response = fetcher._taostats_get("/api/dtao/pool/latest/v1", params={"limit": 1})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(request_mock.call_count, 2)
+        sleep_mock.assert_called_once()
 
 
 if __name__ == "__main__":

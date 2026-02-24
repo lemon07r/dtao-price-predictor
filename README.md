@@ -8,7 +8,9 @@ A tool for analyzing and predicting Bittensor subnet dTAO token price trends, he
 - **Price Prediction**: Leverage machine learning models to forecast future dTAO token prices
 - **Subnet Comparison**: Compare different subnets' metrics and potential returns
 - **Investment Recommendations**: Generate subnet investment recommendations based on comprehensive analysis
+- **Miner Recommendations**: Rank subnets for mining using GPU cluster size, competition, and revenue proxy metrics
 - **Visualization**: Intuitive charts showing historical prices and prediction trends
+- **CSV Export**: Export recommendation tables directly from the GUI
 - **Multi-language Support**: Available in English, Chinese, Japanese, Korean, French, Spanish, and German
 
 ## Installation
@@ -42,6 +44,7 @@ The application includes several tabs:
 3. **Price Prediction**: Predict future prices for a selected subnet using machine learning
 4. **Subnet Comparison**: Compare multiple subnets side-by-side
 5. **Investment Advice**: Get data-driven investment recommendations
+6. **Miner Recommendations**: Get mining-focused subnet rankings and export results to CSV
 
 ### Command Line Interface (CLI)
 
@@ -71,6 +74,11 @@ Create a `.env` file in the project root (same folder as `README.md`) and set:
 ```bash
 TAOSTATS_API_KEY=your_real_taostats_key
 SUBTENSOR_NETWORK=finney
+MAX_SUBNETS=15
+ADVICE_PREDICTION_CANDIDATES=3
+TAOSTATS_MAX_REQUESTS_PER_MINUTE=5
+DTAO_POOL_SNAPSHOT_CACHE_SECONDS=60
+DTAO_HISTORY_CACHE_SECONDS=300
 ```
 
 Notes:

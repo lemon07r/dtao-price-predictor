@@ -7,12 +7,17 @@ from datetime import datetime, timedelta
 import logging
 import os
 import sys
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import random
 
 # Add src directory to system path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.config import SUBTENSOR_NETWORK, TAOSTATS_API_URL, TAOSTATS_API_KEY
+from src.config import (
+    SUBTENSOR_NETWORK,
+    TAOSTATS_API_URL,
+    TAOSTATS_API_KEY,
+    TAOSTATS_MAX_REQUESTS_PER_MINUTE,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -30,12 +35,28 @@ class DataFetcher:
         self.subtensor = self._create_subtensor_client()
         self.headers = {"Content-Type": "application/json"}
         if TAOSTATS_API_KEY and TAOSTATS_API_KEY != "your_api_key":
-            self.headers["Authorization"] = f"Bearer {TAOSTATS_API_KEY}"
+            token = TAOSTATS_API_KEY.strip()
+            # Taostats expects the raw token in the Authorization header.
+            if token.lower().startswith("bearer "):
+                token = token.split(" ", 1)[1].strip()
+            self.headers["Authorization"] = token
         env_allow_mock = os.getenv("DTAO_ALLOW_MOCK_DATA_FALLBACK")
         if allow_mock_fallback is None:
             self.allow_mock_fallback = env_allow_mock == "1"
         else:
             self.allow_mock_fallback = allow_mock_fallback
+        self._pool_snapshot_cache: Dict[int, Dict[str, Any]] = {}
+        self._pool_snapshot_cache_ts: float = 0.0
+        self._pool_snapshot_cache_ttl: int = int(os.getenv("DTAO_POOL_SNAPSHOT_CACHE_SECONDS", "60"))
+        self._history_cache: Dict[Tuple[int, int], pd.DataFrame] = {}
+        self._history_cache_ts: Dict[Tuple[int, int], float] = {}
+        self._history_cache_ttl: int = int(os.getenv("DTAO_HISTORY_CACHE_SECONDS", "300"))
+        self._taostats_request_timestamps: List[float] = []
+        self._taostats_rate_window_seconds: int = 60
+        self._taostats_max_requests_per_minute = max(
+            1,
+            int(os.getenv("TAOSTATS_MAX_REQUESTS_PER_MINUTE", str(TAOSTATS_MAX_REQUESTS_PER_MINUTE)))
+        )
 
     def _create_subtensor_client(self):
         """Create a bittensor Subtensor client compatible with old/new API naming."""
@@ -78,6 +99,131 @@ class DataFetcher:
         if message:
             return f"Taostats HTTP {response.status_code}: {message}"
         return f"Taostats HTTP {response.status_code}"
+
+    def _prune_taostats_request_timestamps(self) -> None:
+        now = time.time()
+        window_start = now - self._taostats_rate_window_seconds
+        self._taostats_request_timestamps = [
+            ts for ts in self._taostats_request_timestamps if ts > window_start
+        ]
+
+    def _wait_for_taostats_slot(self) -> None:
+        self._prune_taostats_request_timestamps()
+        if len(self._taostats_request_timestamps) < self._taostats_max_requests_per_minute:
+            return
+
+        oldest_in_window = self._taostats_request_timestamps[0]
+        sleep_seconds = (oldest_in_window + self._taostats_rate_window_seconds) - time.time() + 0.05
+        if sleep_seconds > 0:
+            logger.info(
+                "Taostats rate limit guard: sleeping %.2fs to stay under %d requests/min.",
+                sleep_seconds,
+                self._taostats_max_requests_per_minute,
+            )
+            time.sleep(sleep_seconds)
+        self._prune_taostats_request_timestamps()
+
+    def _record_taostats_request(self) -> None:
+        self._taostats_request_timestamps.append(time.time())
+        self._prune_taostats_request_timestamps()
+
+    def _taostats_get(
+        self,
+        endpoint_path: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: int = 20,
+        retry_on_429: bool = True
+    ) -> requests.Response:
+        url = f"{TAOSTATS_API_URL}{endpoint_path}"
+        self._wait_for_taostats_slot()
+        response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+        self._record_taostats_request()
+
+        if response.status_code != 429 or not retry_on_429:
+            return response
+
+        retry_after_header = response.headers.get("Retry-After", "").strip()
+        try:
+            retry_after_seconds = float(retry_after_header)
+        except Exception:
+            # When the API does not provide Retry-After, wait a full window.
+            # This avoids immediate repeat 429s when quota was consumed by
+            # previous requests outside this process.
+            retry_after_seconds = float(self._taostats_rate_window_seconds)
+        logger.warning(
+            "Taostats HTTP 429 received. Sleeping %.2fs and retrying once.",
+            retry_after_seconds,
+        )
+        time.sleep(retry_after_seconds)
+        self._wait_for_taostats_slot()
+        response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+        self._record_taostats_request()
+        return response
+
+    def _normalize_pool_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "price": self._to_float(row.get("price"), 0.0),
+            "market_cap": self._to_float(row.get("market_cap"), 0.0),
+            "liquidity": self._to_float(row.get("liquidity"), 0.0),
+            "tao_volume_24_hr": self._to_float(row.get("tao_volume_24_hr"), 0.0),
+            "price_change_1_day": self._to_float(row.get("price_change_1_day"), 0.0),
+            "price_change_1_week": self._to_float(row.get("price_change_1_week"), 0.0),
+            "price_change_1_month": self._to_float(row.get("price_change_1_month"), 0.0),
+            "rank": int(row.get("rank", 0) or 0),
+            "timestamp": row.get("timestamp"),
+        }
+
+    def get_taostats_pool_snapshot(self, force_refresh: bool = False) -> Dict[int, Dict[str, Any]]:
+        """
+        Fetch current pool stats for all subnets from Taostats.
+        Results are cached briefly to avoid repeated API calls.
+        """
+        now = time.time()
+        if (
+            not force_refresh
+            and self._pool_snapshot_cache
+            and (now - self._pool_snapshot_cache_ts) < self._pool_snapshot_cache_ttl
+        ):
+            return self._pool_snapshot_cache
+
+        snapshot: Dict[int, Dict[str, Any]] = {}
+        page = 1
+        max_pages = 10
+
+        for _ in range(max_pages):
+            params = {"page": page, "limit": 200}
+            response = self._taostats_get("/api/dtao/pool/latest/v1", params=params, timeout=20)
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to fetch Taostats pool snapshot (%s)",
+                    self._response_error_message(response),
+                )
+                break
+
+            payload = response.json()
+            rows = self._extract_data_rows(payload)
+            if not rows:
+                break
+
+            for row in rows:
+                netuid = int(row.get("netuid", -1) or -1)
+                if netuid >= 0:
+                    snapshot[netuid] = self._normalize_pool_row(row)
+
+            pagination = payload.get("pagination", {}) if isinstance(payload, dict) else {}
+            next_page = pagination.get("next_page")
+            if next_page in (None, "", 0):
+                break
+            if isinstance(next_page, int):
+                page = next_page
+            else:
+                page += 1
+
+        if snapshot:
+            self._pool_snapshot_cache = snapshot
+            self._pool_snapshot_cache_ts = now
+
+        return snapshot
 
     def _get_subnet_info(self, netuid: int):
         """Fetch subnet info object, handling API differences."""
@@ -185,9 +331,13 @@ class DataFetcher:
     def _get_taostats_subnet_price(self, netuid: int) -> Optional[float]:
         """Get the dTAO price for a specific subnet from Taostats API"""
         try:
-            url = f"{TAOSTATS_API_URL}/api/dtao/pool/latest/v1"
+            snapshot = self.get_taostats_pool_snapshot()
+            cached = snapshot.get(netuid)
+            if cached and cached.get("price", 0) > 0:
+                return cached["price"]
+
             params = {"netuid": netuid, "limit": 1}
-            response = requests.get(url, headers=self.headers, params=params, timeout=20)
+            response = self._taostats_get("/api/dtao/pool/latest/v1", params=params, timeout=20)
             
             if response.status_code == 200:
                 rows = self._extract_data_rows(response.json())
@@ -227,10 +377,17 @@ class DataFetcher:
     def get_historical_dtao_prices(self, netuid: int, days: int = 30) -> pd.DataFrame:
         """Get historical dTAO price data for a specific subnet over a period of time"""
         try:
+            cache_key = (netuid, days)
+            cache_ts = self._history_cache_ts.get(cache_key, 0.0)
+            if (
+                cache_key in self._history_cache
+                and (time.time() - cache_ts) < self._history_cache_ttl
+            ):
+                return self._history_cache[cache_key].copy()
+
             # Calculate start date from current date
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
-            url = f"{TAOSTATS_API_URL}/api/dtao/pool/history/v1"
 
             # Use timestamp range against current Taostats history endpoint.
             start_ts = int(start_date.timestamp())
@@ -249,7 +406,7 @@ class DataFetcher:
                     "page": page,
                     "limit": 200,
                 }
-                response = requests.get(url, headers=self.headers, params=params, timeout=20)
+                response = self._taostats_get("/api/dtao/pool/history/v1", params=params, timeout=20)
                 if response.status_code != 200:
                     return self._handle_historical_price_failure(
                         netuid,
@@ -331,7 +488,10 @@ class DataFetcher:
                 .set_index("date")
             )
 
-            return df.tail(days)
+            result = df.tail(days)
+            self._history_cache[cache_key] = result.copy()
+            self._history_cache_ts[cache_key] = time.time()
+            return result
             
         except RuntimeError:
             raise
@@ -429,9 +589,20 @@ class DataFetcher:
     def _get_taostats_subnet_metrics(self, netuid: int) -> Dict[str, Any]:
         """Get additional subnet metrics from Taostats API"""
         try:
-            url = f"{TAOSTATS_API_URL}/api/dtao/pool/latest/v1"
+            snapshot = self.get_taostats_pool_snapshot()
+            cached = snapshot.get(netuid)
+            if cached:
+                return {
+                    "price": cached.get("price", 0.0),
+                    "market_cap": cached.get("market_cap", 0.0),
+                    "liquidity": cached.get("liquidity", 0.0),
+                    "tao_volume_24_hr": cached.get("tao_volume_24_hr", 0.0),
+                    "price_change_1_day": cached.get("price_change_1_day", 0.0),
+                    "rank": cached.get("rank", 0),
+                }
+
             params = {"netuid": netuid, "limit": 1}
-            response = requests.get(url, headers=self.headers, params=params, timeout=20)
+            response = self._taostats_get("/api/dtao/pool/latest/v1", params=params, timeout=20)
             
             if response.status_code == 200:
                 rows = self._extract_data_rows(response.json())

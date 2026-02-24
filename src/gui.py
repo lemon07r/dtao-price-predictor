@@ -5,6 +5,7 @@ dTAO Price Predictor GUI - Tkinter-based graphical interface
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import json
+import csv
 import os
 import logging
 import threading
@@ -83,6 +84,8 @@ class DTAOPredictorGUI:
 
         # Last prediction result (for saving chart)
         self._last_prediction = None
+        self._last_recommendations: List[Dict[str, Any]] = []
+        self._last_mining_recommendations: List[Dict[str, Any]] = []
 
         self._build_ui()
         self._set_status(f"{self.i18n.get_text('status_ready', 'Ready')} ({self.backend_mode} backend)")
@@ -132,6 +135,7 @@ class DTAOPredictorGUI:
         self._create_price_prediction_tab()
         self._create_subnet_comparison_tab()
         self._create_investment_tab()
+        self._create_mining_tab()
 
         # Status bar
         self.status_var = tk.StringVar()
@@ -316,6 +320,8 @@ class DTAOPredictorGUI:
         tk.Spinbox(ctrl, from_=1, to=20, textvariable=self.rec_limit_var, width=4).pack(side=tk.LEFT, padx=5)
         ttk.Button(ctrl, text=self.i18n.get_text("generate_recommendations", "Generate Recommendations"),
                    command=self._generate_recommendations).pack(side=tk.LEFT, padx=10)
+        ttk.Button(ctrl, text=self.i18n.get_text("export_csv", "Export CSV"),
+                   command=self._export_recommendations_csv).pack(side=tk.LEFT, padx=5)
 
         cols = ("netuid", "name", "investment_score", "price", "price_change", "recommendation_reason")
         self.rec_tree = ttk.Treeview(tab, columns=cols, show="headings", height=12)
@@ -331,6 +337,48 @@ class DTAOPredictorGUI:
             self.rec_tree.heading(c, text=hdr)
             self.rec_tree.column(c, width=w, anchor=tk.CENTER if c != "recommendation_reason" else tk.W)
         self.rec_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+    # -------------------- Tab 6: Miner Recommendations ----------------
+
+    def _create_mining_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text=self.i18n.get_text("tab_miner_recommendation", "Miner Recommendations"))
+
+        ctrl = ttk.LabelFrame(tab, text=self.i18n.get_text("options", "Options"))
+        ctrl.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(ctrl, text=self.i18n.get_text("limit", "Limit") + ":").pack(side=tk.LEFT, padx=5)
+        self.mine_limit_var = tk.IntVar(value=5)
+        tk.Spinbox(ctrl, from_=1, to=20, textvariable=self.mine_limit_var, width=4).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(ctrl, text=self.i18n.get_text("gpu_clusters", "GPU Clusters") + ":").pack(side=tk.LEFT, padx=5)
+        self.mine_gpu_clusters_var = tk.DoubleVar(value=1.0)
+        tk.Spinbox(ctrl, from_=0.1, to=100.0, increment=0.1, textvariable=self.mine_gpu_clusters_var, width=6).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(ctrl, text=self.i18n.get_text("daily_cost_tao", "Daily Cost (TAO)") + ":").pack(side=tk.LEFT, padx=5)
+        self.mine_daily_cost_var = tk.DoubleVar(value=0.0)
+        tk.Spinbox(ctrl, from_=0.0, to=10000.0, increment=0.1, textvariable=self.mine_daily_cost_var, width=7).pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(ctrl, text=self.i18n.get_text("generate_recommendations", "Generate Recommendations"),
+                   command=self._generate_mining_recommendations).pack(side=tk.LEFT, padx=10)
+        ttk.Button(ctrl, text=self.i18n.get_text("export_csv", "Export CSV"),
+                   command=self._export_mining_recommendations_csv).pack(side=tk.LEFT, padx=5)
+
+        cols = ("netuid", "name", "mining_score", "miner_share_pct", "price", "price_change", "recommendation_reason")
+        self.mine_tree = ttk.Treeview(tab, columns=cols, show="headings", height=12)
+        headers = {
+            "netuid": (self.i18n.get_text("netuid", "UID"), 60),
+            "name": (self.i18n.get_text("name", "Name"), 140),
+            "mining_score": (self.i18n.get_text("mining_score", "Mining Score"), 120),
+            "miner_share_pct": (self.i18n.get_text("miner_share", "Share %"), 90),
+            "price": (self.i18n.get_text("price", "Price"), 120),
+            "price_change": (self.i18n.get_text("price_change", "Change %"), 100),
+            "recommendation_reason": (self.i18n.get_text("recommendation_reason", "Reason"), 320),
+        }
+        for c, (hdr, w) in headers.items():
+            self.mine_tree.heading(c, text=hdr)
+            self.mine_tree.column(c, width=w, anchor=tk.CENTER if c != "recommendation_reason" else tk.W)
+        self.mine_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
     # ======================= Actions ==================================
 
@@ -562,6 +610,7 @@ class DTAOPredictorGUI:
         try:
             limit = self.rec_limit_var.get()
             recs = self.comparison_analyzer.generate_investment_recommendations(limit=limit)
+            self._last_recommendations = recs
 
             for item in self.rec_tree.get_children():
                 self.rec_tree.delete(item)
@@ -579,3 +628,109 @@ class DTAOPredictorGUI:
             self._set_status(self.i18n.get_text("status_ready", "Ready"))
         except Exception as e:
             self._set_status(f"{self.i18n.get_text('status_error', 'Error')}: {e}")
+
+    def _export_recommendations_csv(self):
+        if not self._last_recommendations:
+            messagebox.showwarning(
+                self.i18n.get_text("warning", "Warning"),
+                self.i18n.get_text("no_recommendations_to_export", "Generate recommendations first.")
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")],
+        )
+        if not path:
+            return
+
+        fieldnames = [
+            "netuid",
+            "name",
+            "investment_score",
+            "price",
+            "emission",
+            "price_change_percent",
+            "active_validators",
+            "active_miners",
+            "recommendation_reason",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in self._last_recommendations:
+                writer.writerow(row)
+
+        self._set_status(f"Recommendations exported to {path}")
+
+    # --- Mining recommendations ---
+
+    def _generate_mining_recommendations(self):
+        self._set_status(self.i18n.get_text("status_loading", "Loading data..."))
+        self.root.update_idletasks()
+
+        try:
+            limit = self.mine_limit_var.get()
+            gpu_clusters = self.mine_gpu_clusters_var.get()
+            daily_cost_tao = self.mine_daily_cost_var.get()
+            recs = self.comparison_analyzer.generate_mining_recommendations(
+                limit=limit,
+                gpu_clusters=gpu_clusters,
+                daily_cluster_cost_tao=daily_cost_tao,
+            )
+            self._last_mining_recommendations = recs
+
+            for item in self.mine_tree.get_children():
+                self.mine_tree.delete(item)
+
+            for rec in recs:
+                self.mine_tree.insert("", tk.END, values=(
+                    rec.get("netuid", ""),
+                    rec.get("name", ""),
+                    f"{rec.get('mining_profitability_score', 0):.2f}",
+                    f"{rec.get('expected_miner_share_pct', 0):.2f}%",
+                    f"{rec.get('price', 0):.6f}",
+                    f"{rec.get('price_change_percent', 0):.2f}%",
+                    rec.get("recommendation_reason", ""),
+                ))
+
+            self._set_status(self.i18n.get_text("status_ready", "Ready"))
+        except Exception as e:
+            self._set_status(f"{self.i18n.get_text('status_error', 'Error')}: {e}")
+
+    def _export_mining_recommendations_csv(self):
+        if not self._last_mining_recommendations:
+            messagebox.showwarning(
+                self.i18n.get_text("warning", "Warning"),
+                self.i18n.get_text("no_recommendations_to_export", "Generate recommendations first.")
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All", "*.*")],
+        )
+        if not path:
+            return
+
+        fieldnames = [
+            "netuid",
+            "name",
+            "mining_profitability_score",
+            "gross_revenue_index",
+            "expected_miner_share_pct",
+            "emission_per_active_miner",
+            "price",
+            "emission",
+            "price_change_percent",
+            "active_validators",
+            "active_miners",
+            "recommendation_reason",
+        ]
+        with open(path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in self._last_mining_recommendations:
+                writer.writerow(row)
+
+        self._set_status(f"Mining recommendations exported to {path}")

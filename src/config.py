@@ -54,11 +54,17 @@ SUBTENSOR_NETWORK = os.getenv("SUBTENSOR_NETWORK", "finney")  # Options: finney,
 # Taostats API related configuration
 TAOSTATS_API_URL = os.getenv("TAOSTATS_API_URL", "https://api.taostats.io")
 TAOSTATS_API_KEY = os.getenv("TAOSTATS_API_KEY", "your_api_key")
+TAOSTATS_MAX_REQUESTS_PER_MINUTE = int(
+    os.getenv("TAOSTATS_MAX_REQUESTS_PER_MINUTE", "5")
+)
 
 # dTAO price prediction related configuration
 PREDICTION_WINDOW = 30  # Predict for future 30 days
 HISTORICAL_WINDOW = 60  # Use past 60 days of data for training
-MAX_SUBNETS = 150  # Adjusted to handle 100+ subnets with room for expansion
+MAX_SUBNETS = int(os.getenv("MAX_SUBNETS", "150"))  # Set lower (e.g. 10-25) for low API limits
+ADVICE_PREDICTION_CANDIDATES = int(
+    os.getenv("ADVICE_PREDICTION_CANDIDATES", "3")
+)  # Keep low for strict API limits (5 RPM)
 
 # Interface configuration
 DEFAULT_DISPLAY_LIMIT = 20  # Default to display top 20 subnets

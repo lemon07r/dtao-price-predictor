@@ -150,7 +150,13 @@ class PricePredictor:
 
         return feature_df.values, list(feature_df.columns), fallback_logged
     
-    def train_model(self, netuid: int, model_name: Optional[str] = None, historical_days: int = HISTORICAL_WINDOW) -> Dict[str, Any]:
+    def train_model(
+        self,
+        netuid: int,
+        model_name: Optional[str] = None,
+        historical_days: int = HISTORICAL_WINDOW,
+        historical_df: Optional[pd.DataFrame] = None
+    ) -> Dict[str, Any]:
         """Train price prediction model for a specific subnet"""
         try:
             # Resolve requested model name and gracefully fall back to the default.
@@ -164,7 +170,10 @@ class PricePredictor:
             model = self.models[resolved_model_name]
             
             # Get historical price data
-            df = self.data_fetcher.get_historical_dtao_prices(netuid, days=historical_days)
+            df = historical_df if historical_df is not None else self.data_fetcher.get_historical_dtao_prices(
+                netuid,
+                days=historical_days
+            )
             
             if len(df) < 10:  # Ensure enough data for training
                 logger.error(f"Not enough historical data for subnet {netuid} to train model")
@@ -230,8 +239,18 @@ class PricePredictor:
     def predict_future_prices(self, netuid: int, days: int = PREDICTION_WINDOW, model_name: Optional[str] = None) -> Dict[str, Any]:
         """Predict future price trends for a subnet"""
         try:
+            historical_window = max(days * 2, HISTORICAL_WINDOW)
+
+            # Fetch history once and reuse it for both training and prediction.
+            history_df = self.data_fetcher.get_historical_dtao_prices(netuid, days=historical_window)
+
             # Train model
-            model_result = self.train_model(netuid, model_name, historical_days=max(days * 2, HISTORICAL_WINDOW))
+            model_result = self.train_model(
+                netuid,
+                model_name,
+                historical_days=historical_window,
+                historical_df=history_df
+            )
             
             if not model_result['success']:
                 return {
@@ -240,8 +259,8 @@ class PricePredictor:
                     'error': model_result.get('error', "Failed to train model")
                 }
             
-            # Get latest historical data as starting point
-            df = self.data_fetcher.get_historical_dtao_prices(netuid, days=max(30, days))
+            # Get latest historical slice as starting point
+            df = history_df.tail(max(30, days))
             
             if len(df) < 10:
                 logger.error(f"Not enough historical data for subnet {netuid} to make prediction")
